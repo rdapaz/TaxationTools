@@ -149,15 +149,19 @@ python statement_manager.py -d expenses.db -e expenses.xlsx
 
 ### 4. Manually review/correct categories in Excel
 
+python excel_to_db_sync.py -i expenses.xlsx -d expenses.db --dry-run
+python excel_to_db_sync.py -i expenses.xlsx -d expenses.db
+
 ### 5. Train your local model from corrected data
 python expense_classifier_trainer.py -i expenses.xlsx
+
+
 
 ### 6. Use your trained model for future classifications (free!)
 python expense_classifier_predictor.py -d expenses.db -m models
 
 ### 7. Export final results
 python statement_manager.py -d expenses.db -e final_expenses.xlsx
-
 
 
 # Default: Only classify empty/unclassified (ai_classified=0)
