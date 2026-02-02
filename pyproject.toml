@@ -1,0 +1,12 @@
+[project]
+name = "TaxationTools"
+version = "0.1.0"
+description = "Credit card statement manager with AI classification"
+requires-python = ">=3.8"
+dependencies = [
+    "pyperclip>=1.8.2",
+    "openpyxl>=3.1.0",
+    "anthropic>=0.40.0",
+]
+
+# Remove the build-system section entirely
