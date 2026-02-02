@@ -1,155 +1,387 @@
-import pandas as pd
+import re
+import sys
 import sqlite3
 import argparse
+from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
+import pyperclip
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
-def sync_excel_to_database(excel_path: str, db_path: str, dry_run: bool = False):
-    """Sync category corrections from Excel back to database using ID"""
+class StatementManager:
+    def __init__(self, db_path, config_path=None):
+        self.db_path = db_path
+        self.conn = None
+        self.categories = [
+            "software",
+            "professional membership",
+            "technical library",
+            "magazines and journals",
+            "training",
+            "not work related",
+            "other"
+        ]
+        self.api_key = None
+        self.client = None
 
-    # Connect to database
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+        if config_path:
+            self._load_config(config_path)
 
-    # Load Excel file
-    print(f"Reading Excel file: {excel_path}")
-    xls = pd.ExcelFile(excel_path)
+        self._init_database()
 
-    total_updated = 0
-    total_processed = 0
-    errors = []
+    def _load_config(self, config_path):
+        """Load configuration from JSON file"""
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                self.api_key = config.get('anthropic_api_key')
+                if self.api_key:
+                    import anthropic
+                    self.client = anthropic.Anthropic(api_key=self.api_key)
+                    print("✓ Claude API configured")
+        except Exception as e:
+            print(f"Warning: Could not load config file: {e}")
 
-    for sheet_name in xls.sheet_names:
-        print(f"\nProcessing sheet: {sheet_name}")
-        df = pd.read_excel(excel_path, sheet_name=sheet_name)
+    def _init_database(self):
+        """Initialize database and create table if it doesn't exist"""
+        self.conn = sqlite3.connect(self.db_path)
+        cursor = self.conn.cursor()
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS transactions
+                       (
+                           id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                           trans_date       TEXT NOT NULL,
+                           description      TEXT NOT NULL,
+                           reference_number TEXT NOT NULL,
+                           amount           REAL NOT NULL,
+                           category         TEXT,
+                           ai_classified    INTEGER   DEFAULT 0,
+                           created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                           UNIQUE (trans_date, reference_number, amount)
+                       )
+                       """)
+        self.conn.commit()
 
-        # Check for ID column
-        if 'ID' not in df.columns:
-            print(f"  ⚠️  Skipping - no ID column (old format)")
-            continue
+    def parse_clipboard(self):
+        """Parse clipboard data and extract transactions - cross-platform"""
+        try:
+            data = pyperclip.paste()
+        except Exception as e:
+            print(f"Error accessing clipboard: {e}")
+            print("Make sure you have clipboard access enabled for this application.")
+            return []
 
-        # Check required columns
-        required_cols = ['ID', 'Category']
-        if not all(col in df.columns for col in required_cols):
-            print(f"  ⚠️  Skipping - missing required columns")
-            continue
+        if not data:
+            print("Clipboard is empty")
+            return []
 
-        sheet_updated = 0
+        transactions = []
+        lines = data.splitlines()
 
-        for idx, row in df.iterrows():
-            total_processed += 1
+        # Pattern to match date at start of line
+        date_pattern = re.compile(r'^(\d{6})\s+(.+)')
+        # Pattern to match reference number (long digit sequence)
+        ref_pattern = re.compile(r'\d{15,}')
 
-            # Get ID and category
-            trans_id = int(row['ID'])
-            category = str(row['Category']).strip() if pd.notna(row['Category']) else ''
-
-            # Remove emoji if present
-            category = category.replace('🤖', '').strip()
-
-            # Skip if no category
-            if not category:
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
                 continue
 
-            # Get current category from database
-            cursor.execute("""
-                           SELECT category, ai_classified
-                           FROM transactions
-                           WHERE id = ?
-                           """, (trans_id,))
+            match = date_pattern.match(line)
+            if match:
+                date_str = match.group(1)
+                rest = match.group(2).strip()
 
-            result = cursor.fetchone()
+                # Check if amount is on this line or next
+                amount_match = re.search(r'([\d.]+)$', rest)
 
-            if result:
-                current_category, ai_classified = result
+                if amount_match:
+                    # Amount is on same line
+                    amount = Decimal(amount_match.group(1))
+                    desc_and_ref = rest[:amount_match.start()].strip()
 
-                # Only update if category has changed
-                if current_category != category:
-                    if not dry_run:
-                        # Update category, set ai_classified to 0 (manual correction)
-                        cursor.execute("""
-                                       UPDATE transactions
-                                       SET category      = ?,
-                                           ai_classified = 0
-                                       WHERE id = ?
-                                       """, (category, trans_id))
+                    # Extract reference number from next line if available
+                    ref_num = ""
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        ref_match = ref_pattern.search(next_line)
+                        if ref_match:
+                            ref_num = ref_match.group(0)
+                            i += 1  # Skip the reference line
 
-                    print(f"  ✓ ID {trans_id}: '{current_category or '(empty)'}' → '{category}'")
-                    sheet_updated += 1
-                    total_updated += 1
+                    # Format date as YYYY-MM-DD
+                    formatted_date = f"20{date_str[4:6]}-{date_str[2:4]}-{date_str[0:2]}"
+
+                    transactions.append({
+                        'date': formatted_date,
+                        'description': desc_and_ref,
+                        'reference': ref_num,
+                        'amount': float(amount)
+                    })
+
+            i += 1
+
+        return transactions
+
+    def classify_transaction(self, description: str, amount: float):
+        """Use Claude API to classify a transaction"""
+        if not self.client:
+            return None
+
+        try:
+            prompt = f"""Given this credit card transaction, classify it into one of these categories for tax deduction purposes:
+
+Categories:
+- "software": Software purchases, SaaS subscriptions, development tools
+- "professional membership": Professional organization memberships, certifications
+- "technical library": Books, technical publications, O'Reilly, Manning, etc.
+- "magazines and journals": Technical magazines, IEEE, ACM subscriptions
+- "training": Online courses, conferences, workshops, training materials
+- "not work related": Personal purchases, food, entertainment, general shopping
+- "other": Work-related but doesn't fit other categories
+
+Transaction:
+Description: {description}
+Amount: ${amount}
+
+Context: This is for an OT cybersecurity professional in industrial control systems.
+
+Respond with ONLY the category name in lowercase, nothing else."""
+
+            message = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=50,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            category = message.content[0].text.strip().strip('"').lower()
+
+            # Validate category
+            if category in self.categories:
+                return category
             else:
-                errors.append(f"Row {idx + 2}: ID {trans_id} not found in database")
+                return "other"
 
-        if sheet_updated > 0:
-            print(f"  Updated {sheet_updated} transactions")
-        else:
-            print(f"  No changes needed")
+        except Exception as e:
+            print(f"  Warning: Classification failed for '{description[:40]}...': {e}")
+            return None
 
-    # Commit changes
-    if not dry_run:
-        conn.commit()
-        print(f"\n✓ Database updated")
+    def add_transactions(self, transactions, use_ai=False):
+        """Add transactions to database, checking for duplicates"""
+        cursor = self.conn.cursor()
+        added = 0
+        duplicates = []
 
-    conn.close()
+        for i, trans in enumerate(transactions, 1):
+            category = None
+            ai_classified = 0
 
-    # Summary
-    print(f"\n{'=' * 60}")
-    if dry_run:
-        print("DRY RUN COMPLETE")
-        print(f"Would update: {total_updated} transactions")
-    else:
-        print("SYNC COMPLETE")
-        print(f"Total processed: {total_processed} rows")
-        print(f"Total updated: {total_updated} transactions")
+            # Try AI classification if enabled
+            if use_ai and self.client:
+                print(f"  Classifying {i}/{len(transactions)}: {trans['description'][:50]}...")
+                category = self.classify_transaction(trans['description'], trans['amount'])
+                if category:
+                    ai_classified = 1
+                    print(f"    → {category}")
 
-    if errors:
-        print(f"\nErrors/Warnings ({len(errors)}):")
-        for error in errors[:10]:
-            print(f"  ⚠️  {error}")
-        if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more errors")
+            try:
+                cursor.execute("""
+                               INSERT INTO transactions (trans_date, description, reference_number, amount, category,
+                                                         ai_classified)
+                               VALUES (?, ?, ?, ?, ?, ?)
+                               """, (trans['date'], trans['description'], trans['reference'], trans['amount'], category,
+                                     ai_classified))
+                added += 1
+            except sqlite3.IntegrityError:
+                duplicates.append(trans)
+
+        self.conn.commit()
+
+        return added, duplicates
+
+    def export_to_excel(self, output_path):
+        """Export transactions to Excel with monthly worksheets"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+                       SELECT id, trans_date, description, reference_number, amount, category, ai_classified
+                       FROM transactions
+                       ORDER BY trans_date
+                       """)
+
+        transactions = cursor.fetchall()
+
+        if not transactions:
+            print("No transactions to export")
+            return
+
+        # Group by month
+        monthly_data = {}
+        for trans in transactions:
+            trans_id = trans[0]
+            date_obj = datetime.strptime(trans[1], '%Y-%m-%d')
+            month_key = date_obj.strftime('%Y-%m')
+            month_name = date_obj.strftime('%b %Y')
+
+            if month_name not in monthly_data:
+                monthly_data[month_name] = []
+
+            monthly_data[month_name].append(trans)
+
+        # Create workbook
+        wb = Workbook()
+        wb.remove(wb.active)  # Remove default sheet
+
+        # Create data validation for categories
+        dv = DataValidation(type="list", formula1=f'"{",".join(self.categories)}"', allow_blank=True)
+
+        for month_name, trans_list in sorted(monthly_data.items()):
+            # Create worksheet (sanitize name for Excel)
+            ws_name = month_name[:31]  # Excel limit
+            ws = wb.create_sheet(title=ws_name)
+
+            # Headers - Added ID column
+            headers = ['ID', 'Date', 'Description', 'Reference', 'Amount', 'Category']
+            ws.append(headers)
+
+            # Style headers
+            header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+            header_font = Font(bold=True, color='FFFFFF')
+
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center')
+
+            # Add data
+            for trans in trans_list:
+                trans_id = trans[0]
+                date_obj = datetime.strptime(trans[1], '%Y-%m-%d')
+                formatted_date = date_obj.strftime('%d/%m/%Y')
+                category = trans[5] or ''
+
+                # Add indicator if AI classified
+                if trans[6] == 1 and category:  # ai_classified flag
+                    category = f"{category} 🤖"
+
+                ws.append([trans_id, formatted_date, trans[2], trans[3], trans[4], category])
+
+            # Add data validation to category column (now column F)
+            last_row = ws.max_row
+            dv.add(f'F2:F{last_row}')
+            ws.add_data_validation(dv)
+
+            # Adjust column widths
+            ws.column_dimensions['A'].width = 8  # ID
+            ws.column_dimensions['B'].width = 12  # Date
+            ws.column_dimensions['C'].width = 45  # Description
+            ws.column_dimensions['D'].width = 20  # Reference
+            ws.column_dimensions['E'].width = 12  # Amount
+            ws.column_dimensions['F'].width = 28  # Category
+
+            # Format amount column as currency
+            for row in range(2, last_row + 1):
+                ws[f'E{row}'].number_format = '$#,##0.00'
+
+        # Save workbook
+        wb.save(output_path)
+        print(f"\n✓ Excel file created: {output_path}")
+        print(f"  Total worksheets: {len(monthly_data)}")
+
+        # Count AI classifications
+        ai_count = sum(1 for trans in transactions if trans[6] == 1)
+        if ai_count > 0:
+            print(f"  AI-classified entries: {ai_count} (marked with 🤖)")
+
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Sync category corrections from Excel back to database using ID column',
+        description='Credit Card Statement Manager with AI Classification (Cross-platform)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Sync corrections from Excel to database
-  python excel_to_db_sync.py -i expenses.xlsx -d expenses.db
+  # Add transactions from clipboard
+  python statement_manager.py -d statements.db -a
 
-  # Dry run to see what would change
-  python excel_to_db_sync.py -i expenses.xlsx -d expenses.db --dry-run
+  # Add with AI classification
+  python statement_manager.py -d statements.db -c config.json -a --classify
 
-Workflow:
-  1. Export: python statement_manager.py -d expenses.db -e expenses.xlsx
-  2. Edit categories in Excel (ID column is read-only reference)
-  3. Sync back: python excel_to_db_sync.py -i expenses.xlsx -d expenses.db
+  # Export to Excel
+  python statement_manager.py -d statements.db -e expenses.xlsx
+
+  # Add with AI and export
+  python statement_manager.py -d statements.db -c config.json -a --classify -e expenses.xlsx
         """
     )
 
-    parser.add_argument('-i', '--input', required=True,
-                        help='Path to Excel file with corrections')
     parser.add_argument('-d', '--database', required=True,
                         help='Path to SQLite database file')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Show what would be updated without modifying database')
+    parser.add_argument('-c', '--config',
+                        help='Path to config file (JSON with anthropic_api_key)')
+    parser.add_argument('-a', '--add', action='store_true',
+                        help='Add transactions from clipboard to database')
+    parser.add_argument('--classify', action='store_true',
+                        help='Use AI to classify transactions (requires -c and -a)')
+    parser.add_argument('-e', '--export',
+                        help='Export database to Excel file')
 
     args = parser.parse_args()
 
-    # Validate files exist
-    if not Path(args.input).exists():
-        print(f"Error: Excel file not found: {args.input}")
-        return
+    # Validate arguments
+    if args.classify and not args.add:
+        print("Error: --classify requires -a (add) flag")
+        sys.exit(1)
 
-    if not Path(args.database).exists():
-        print(f"Error: Database file not found: {args.database}")
-        return
+    if args.classify and not args.config:
+        print("Error: --classify requires -c (config) flag with API key")
+        sys.exit(1)
 
-    if args.dry_run:
-        print("DRY RUN MODE - No database updates will be made\n")
+    # Initialize manager
+    manager = StatementManager(args.database, args.config)
 
-    sync_excel_to_database(args.input, args.database, args.dry_run)
+    try:
+        # Add transactions if requested
+        if args.add:
+            print("Parsing clipboard data...")
+            transactions = manager.parse_clipboard()
+
+            if not transactions:
+                print("No valid transactions found in clipboard")
+            else:
+                print(f"Found {len(transactions)} transactions\n")
+
+                if args.classify:
+                    print("AI Classification enabled...")
+
+                added, duplicates = manager.add_transactions(transactions, use_ai=args.classify)
+
+                print(f"\n✓ Added {added} new transactions")
+
+                if duplicates:
+                    print(f"\n⚠️  Found {len(duplicates)} duplicate(s):")
+                    for dup in duplicates:
+                        print(f"  {dup['date']} - {dup['description'][:50]} - ${dup['amount']}")
+                    print("\nDuplicate transactions were not added to the database.")
+                    sys.exit(1)
+
+        # Export to Excel if requested
+        if args.export:
+            print(f"\nExporting to Excel...")
+            manager.export_to_excel(args.export)
+
+    finally:
+        manager.close()
 
 
 if __name__ == "__main__":
