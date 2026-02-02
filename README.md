@@ -136,3 +136,35 @@ python statement_manager.py -d expenses.db -c config.json -a --classify -e expen
 If you hit rate limits, you'll see errors like:
 ```
 ✗ ID 123 failed: rate_limit_error: requests per minute limit exceeded
+
+# Workflow
+### 1. Add transactions (Python)
+python statement_manager.py -d expenses.db -a
+
+### 2. Classify with Claude AI (Go - fast)
+.\classifier.exe -d expenses.db -c config.json -w 10
+
+### 3. Export to Excel
+python statement_manager.py -d expenses.db -e expenses.xlsx
+
+### 4. Manually review/correct categories in Excel
+
+### 5. Train your local model from corrected data
+python expense_classifier_trainer.py -i expenses.xlsx
+
+### 6. Use your trained model for future classifications (free!)
+python expense_classifier_predictor.py -d expenses.db -m models
+
+### 7. Export final results
+python statement_manager.py -d expenses.db -e final_expenses.xlsx
+
+
+
+# Default: Only classify empty/unclassified (ai_classified=0)
+python expense_classifier_predictor.py -d expenses.db -m models
+
+# Re-classify AI predictions too (ai_classified=0 and 1)
+python expense_classifier_predictor.py -d expenses.db -m models --reclassify
+
+# Test what would happen without updating
+python expense_classifier_predictor.py -d expenses.db -m models --reclassify --dry-run
