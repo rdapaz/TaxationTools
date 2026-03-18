@@ -60,7 +60,7 @@ Thumbs.db
 *.log
 
 # Model files (can be large)
-models/
+/models/
 *.pt
 *.pkl
 *.pth
