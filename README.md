@@ -1,174 +1,151 @@
-# Taxation Tools
+# BudgetBuddy
 
-A suite of tools for managing and classifying credit card expenses for tax purposes.
+A polished PySide6 desktop application for Australian household budgeting. Import bank transactions, classify them with AI, track spending against budgets, and visualise your finances.
+
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![PySide6](https://img.shields.io/badge/GUI-PySide6-green)
+![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)
 
 ## Features
 
-- **Python Script** (`statement_manager.py`): Parse clipboard data, store in SQLite, export to Excel
-- **Go Classifier** (`classifier.go`): Concurrent AI-powered classification using Claude API
-- **PyTorch Trainer** (`expense_classifier_trainer.py`): Train local model from corrected data
-- **Local Predictor** (`expense_classifier_predictor.py`): Classify expenses using trained model
+### Desktop GUI
+- **Dashboard** — Monthly spending summary with stat cards and category breakdown charts
+- **Transactions** — Searchable, sortable transaction list with inline category editing
+- **Reports** — Visual spending reports with matplotlib charts (category, trend, monthly comparison)
+- **Budgets** — Set monthly budgets per category with progress tracking and alerts
+- **Settings** — Classification engine configuration, data import, model training, and data coverage overview
 
-## Setup
+### AI Classification (Dual Engine)
+- **Anthropic Claude API** — Cloud-based classification using `claude-sonnet-4-20250514` with batch processing
+- **Local DistilBERT Model** — Train your own model from corrected data for free, offline classification
+- **Smart Fallback** — If the selected engine is unavailable, automatically falls back to the other
+- Toggle between engines from Settings with a single click
+
+### Security
+- **Keyring Integration** — API keys stored in Windows Credential Manager (or macOS Keychain / Linux Secret Service), never in config files
+- Safe to share the app without exposing API credits
+
+### 19 Budget Categories (9 Groups)
+
+| Group | Categories |
+|-------|-----------|
+| Housing | Mortgage/Rent, Utilities, Home Maintenance |
+| Transport | Fuel, Car Maintenance, Public Transport, Parking & Tolls |
+| Food | Groceries, Dining Out |
+| Personal | Clothing, Health & Medical, Personal Care |
+| Financial | Insurance, Bank Fees & Interest |
+| Lifestyle | Entertainment, Subscriptions |
+| Family | Childcare & Education, Pets |
+| Other | Other |
+| — | Uncategorised |
+
+### Quality of Life
+- **Transaction Search** — Seamlessly search by description, date (`2026-02` for all Feb transactions), or category
+- **Excel Export** — Export currently displayed transactions to styled `.xlsx` with one click or `Ctrl+E`
+- **Keyboard Shortcuts** — `Ctrl+1` through `Ctrl+5` for instant tab navigation
+- **Help System** — `(?)` buttons on every view and card, rendering a built-in markdown help file
+- **Persistent Layout** — Window size and position remembered between launches
+
+## Installation
 
 ### Prerequisites
+- Python 3.10+
+- pip
 
-- Python 3.8+
-- Go 1.20+
-- Anthropic API key
+### Setup
 
-### Installation
-
-1. Clone the repository:
 ```bash
-git clone <your-repo-url>
-cd TaxationTools
+git clone https://github.com/rdapaz/BudgetBuddy.git
+cd BudgetBuddy
+pip install -e .
 ```
 
-2. Install Python dependencies:
-```bash
-pip install pyperclip openpyxl anthropic torch transformers scikit-learn pandas
-```
-
-3. Install Go dependencies:
-```bash
-go mod tidy
-```
-
-4. Create `config.json` with your API key:
-```json
-{
-  "anthropic_api_key": "sk-ant-your-key-here"
-}
-```
+### Key Dependencies
+- `PySide6` — Qt GUI framework
+- `anthropic` — Claude API client
+- `torch` + `transformers` — Local DistilBERT model
+- `matplotlib` — Charts and reports
+- `openpyxl` — Excel export
+- `keyring` — Secure API key storage
+- `scikit-learn` — Model training utilities
 
 ## Usage
 
-### Basic Workflow
+### Launch the App
 
-1. **Add transactions from clipboard:**
 ```bash
+python budgetbuddy.py
+```
+
+### Recommended Workflow
+
+1. **Import** — Paste bank transactions from clipboard via Settings → Import
+2. **Classify with Claude API** — Use the Anthropic engine to bulk-classify transactions
+3. **Review & Correct** — Manually verify and fix any misclassifications in the Transactions tab
+4. **Train Local Model** — Once you have enough corrected data, train DistilBERT from Settings
+5. **Use Either Engine** — For future imports, use whichever engine you prefer
+
+### Legacy CLI Tools
+
+The original command-line tools are still available:
+
+```bash
+# Import from clipboard
 python statement_manager.py -d expenses.db -a
-```
 
-2. **Classify with AI (fast, concurrent):**
-```bash
+# Classify with Go (concurrent)
 go run classifier.go -d expenses.db -c config.json -w 10
-# Or use compiled binary:
-.\classifier.exe -d expenses.db -c config.json -w 10
-```
 
-3. **Export to Excel for review:**
-```bash
+# Export to Excel
 python statement_manager.py -d expenses.db -e expenses.xlsx
-```
 
-4. **Train local model from corrected data:**
-```bash
+# Train local model
 python expense_classifier_trainer.py -i expenses.xlsx
-```
 
-5. **Use local model for future classifications:**
-```bash
+# Predict with local model
 python expense_classifier_predictor.py -d expenses.db -m models
 ```
 
-## Categories
+## Project Structure
 
-- `software`: Software purchases, SaaS subscriptions
-- `professional membership`: Professional organizations, certifications
-- `technical library`: Books, technical publications
-- `magazines and journals`: Technical magazines, subscriptions
-- `training`: Courses, conferences, workshops
-- `not work related`: Personal purchases
-- `other`: Work-related but uncategorized
-
-## Building
-
-### Go Binary
-```bash
-go build -o classifier.exe classifier.go
+```
+BudgetBuddy/
+├── budgetbuddy.py              # App entry point
+├── gui/
+│   ├── main_window.py          # Main window with sidebar navigation
+│   ├── categories.py           # 19 budget categories definition
+│   ├── theme.py                # Colours, fonts, shared styles
+│   ├── help.md                 # Built-in help documentation
+│   ├── models/
+│   │   ├── database.py         # SQLite data access layer
+│   │   └── api_key.py          # Keyring-based API key management
+│   ├── views/
+│   │   ├── dashboard.py        # Monthly spending overview
+│   │   ├── transactions.py     # Transaction list with search/export
+│   │   ├── reports.py          # Charts and visual reports
+│   │   ├── budgets.py          # Budget tracking per category
+│   │   └── settings.py         # Engine config, import, training
+│   ├── widgets/
+│   │   ├── chart_canvas.py     # Matplotlib canvas widget
+│   │   ├── stat_card.py        # Dashboard stat card widget
+│   │   └── help_window.py      # Help dialog with HTML rendering
+│   └── workers/
+│       ├── classify_worker.py  # API + Local classification threads
+│       └── train_worker.py     # DistilBERT training thread
+├── statement_manager.py        # Legacy CLI import/export
+├── classifier.go               # Legacy Go concurrent classifier
+├── expense_classifier_trainer.py   # Legacy CLI trainer
+├── expense_classifier_predictor.py # Legacy CLI predictor
+└── pyproject.toml
 ```
 
 ## Configuration
 
-Create a `config.json` file (not tracked in git):
-```json
-{
-  "anthropic_api_key": "your-api-key-here"
-}
-```
+- **API Key**: Stored securely via `keyring` — configure in Settings → Classification Engine
+- **Engine Preference**: Saved in SQLite `app_settings` table
+- **Window Geometry**: Saved via Qt's `QSettings` (Windows Registry)
+- **No config files needed** — all settings managed through the GUI
 
 ## License
 
 MIT
-
-## Notes
-
-- Database files (`.db`) are not tracked in git
-- Config files with API keys are not tracked in git
-- Excel output files are not tracked in git
-- Trained models are not tracked in git (can be large)
-
-
-# Add transactions WITHOUT AI classification
-python statement_manager.py -d expenses.db -a
-
-# Add transactions WITH AI classification
-python statement_manager.py -d expenses.db -c config.json -a --classify
-
-# Export to Excel (AI classifications shown with 🤖 emoji)
-python statement_manager.py -d expenses.db -e expenses.xlsx
-
-# Complete workflow: add with AI, then export
-python statement_manager.py -d expenses.db -c config.json -a --classify -e expenses.xlsx
-
-# Conservative (should work for everyone)
-.\classifier.exe -d expenses.db -c config.json -w 5
-
-# Moderate (good for Build Tier 1+)
-.\classifier.exe -d expenses.db -c config.json -w 20
-
-# Aggressive (Build Tier 2+)
-.\classifier.exe -d expenses.db -c config.json -w 50
-```
-
-If you hit rate limits, you'll see errors like:
-```
-✗ ID 123 failed: rate_limit_error: requests per minute limit exceeded
-
-# Workflow
-### 1. Add transactions (Python)
-python statement_manager.py -d expenses.db -a
-
-### 2. Classify with Claude AI (Go - fast)
-.\classifier.exe -d expenses.db -c config.json -w 10
-
-### 3. Export to Excel
-python statement_manager.py -d expenses.db -e expenses.xlsx
-
-### 4. Manually review/correct categories in Excel
-
-python excel_to_db_sync.py -i expenses.xlsx -d expenses.db --dry-run
-python excel_to_db_sync.py -i expenses.xlsx -d expenses.db
-
-### 5. Train your local model from corrected data
-python expense_classifier_trainer.py -i expenses.xlsx
-
-
-
-### 6. Use your trained model for future classifications (free!)
-python expense_classifier_predictor.py -d expenses.db -m models
-
-### 7. Export final results
-python statement_manager.py -d expenses.db -e final_expenses.xlsx
-
-
-# Default: Only classify empty/unclassified (ai_classified=0)
-python expense_classifier_predictor.py -d expenses.db -m models
-
-# Re-classify AI predictions too (ai_classified=0 and 1)
-python expense_classifier_predictor.py -d expenses.db -m models --reclassify
-
-# Test what would happen without updating
-python expense_classifier_predictor.py -d expenses.db -m models --reclassify --dry-run
